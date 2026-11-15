@@ -30,6 +30,7 @@ pub mod scrobble;
 mod sink;
 pub mod soloist;
 mod spectrum;
+mod sponsorblock;
 pub mod spotify;
 mod stream;
 pub mod subsonic;
@@ -52,7 +53,7 @@ pub use audio::Meter;
 pub use equalizer::Equalizer;
 pub use models::{
     Album, AlbumCatalogue, AlbumDetail, Artist, ArtistCatalogue, ArtistProfile, ArtistRef,
-    Contributor, CoverSize, Credit, Genre, GenreDetail, GenreItem, GenreSection, HomeFeed,
+    Contributor, CoverSize, Credit, Found, Genre, GenreDetail, GenreItem, GenreSection, HomeFeed,
     ImportedPlaylist, Lyrics, LyricsHit, LyricsLane, LyricsLine, LyricsQuery, LyricsWord,
     PinOutcome, PinTarget, PinTargetKind, Playlist, PlaylistDetail, ReleaseType, RomanizedText,
     SavedArtist, Track, TrackKey, TrackTags, UserDetail, UserProfile, Voice, WritingSystem,
@@ -60,6 +61,7 @@ pub use models::{
 pub use output::{Server as SoundServer, missing_bridge};
 pub use redact::redact;
 pub use spectrum::{Analyzer, Level, Listening, Spectrum, Watch};
+pub use sponsorblock::{SkipSegment, SponsorBlock};
 
 pub const LOCAL_TRACK_PREFIX: &str = "local:";
 pub const LOCAL_ALBUM_PREFIX: &str = "local-album:";
@@ -125,6 +127,13 @@ pub trait MusicApi: Send + Sync {
     /// A cover url this provider handed out, at `size`. It is worked out from the url alone,
     /// so `None` means the provider cannot tell and the caller loads the album instead.
     fn cover_at(&self, _cover: &str, _size: CoverSize) -> Option<String> {
+        None
+    }
+
+    /// The provider's original-resolution url for a cover it handed out, when the url alone
+    /// names one. Only the explicit full-size cover view asks for this, so a provider that
+    /// cannot name an original keeps showing the large cover.
+    fn cover_original(&self, _cover: &str) -> Option<String> {
         None
     }
 
@@ -368,6 +377,24 @@ pub trait MusicApi: Send + Sync {
     /// the songs and albums it found.
     async fn search_artists(&self, _query: &str) -> Result<Vec<SavedArtist>> {
         Ok(Vec::new())
+    }
+
+    /// Songs, albums, playlists and artists for `query`, which is what the search page and the
+    /// command line show. The default runs the four searches at once. A provider that can
+    /// answer every kind in one request overrides it, so a query costs one round trip.
+    async fn search_all(&self, query: &str) -> Found {
+        let (tracks, albums, playlists, artists) = futures::join!(
+            self.search(query),
+            self.search_albums(query),
+            self.search_playlists(query),
+            self.search_artists(query),
+        );
+        Found {
+            tracks,
+            albums,
+            playlists,
+            artists,
+        }
     }
 
     async fn home(&self) -> Result<HomeFeed> {
@@ -655,6 +682,36 @@ pub enum PlaybackEvent {
         id: String,
         track: TrackSignal,
     },
+    /// The queue window Soloist currently holds, in play order around the current track.
+    QueueChanged {
+        current: Option<connect::QueuedTrack>,
+        previous: Vec<connect::QueuedTrack>,
+        upcoming: Vec<connect::QueuedTrack>,
+    },
+    /// Soloist moved to a track another Spotify app queued.
+    QueuedTrack {
+        id: String,
+        at: Duration,
+    },
+    /// Soloist could not add this track to its shared queue.
+    QueueRejected {
+        id: String,
+        append: QueueAppend,
+    },
+    /// Soloist confirmed a track was added to its shared queue.
+    QueueAppended {
+        id: String,
+        append: QueueAppend,
+    },
+}
+
+/// Why Sonora added a track to a shared player queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueAppend {
+    /// The listener explicitly added a track to the queue.
+    User,
+    /// The tail of a collection Sonora is publishing to the shared queue.
+    Publication,
 }
 
 impl PlaybackEvent {
@@ -689,6 +746,17 @@ pub trait Player: Send + Sync {
     /// Fetches a track ahead of time so a later `load` starts at once. `segue` marks the next
     /// queue item, which a gapless engine may already line up behind the current one.
     fn preload(&self, track_id: &str, segue: bool) -> Result<()>;
+
+    /// Adds a track to the engine's own shared queue. `false` keeps queue ownership local.
+    fn append_to_queue(&self, _track_id: &str, _append: QueueAppend) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Whether the engine can honour ordered local queue placements.
+    fn can_order_queue(&self) -> bool {
+        true
+    }
+
     fn play(&self);
     fn pause(&self);
 
@@ -954,6 +1022,8 @@ impl std::fmt::Display for SignInFailure {
 
 impl std::error::Error for SignInFailure {}
 
+/// One account or profile a sign-in can go on as. The picked `id` comes back on the prompt's
+/// input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountChoice {
     pub id: String,
@@ -961,9 +1031,25 @@ pub struct AccountChoice {
     pub detail: Option<String>,
 }
 
+/// What the choices in a `SignInPrompt::Accounts` are, which decides how the picker asks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountKind {
+    /// Separate accounts that one browser session is signed in to at once.
+    Session,
+    /// Profiles inside one account, such as the members of a family plan.
+    Profile,
+}
+
+/// The accounts a sign-in asks the user to pick from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountChoices {
+    pub kind: AccountKind,
+    pub accounts: Vec<AccountChoice>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignInPrompt {
-    Accounts(Vec<AccountChoice>),
+    Accounts(AccountChoices),
     Code { code: String, url: String },
     Url(String),
     Secret,

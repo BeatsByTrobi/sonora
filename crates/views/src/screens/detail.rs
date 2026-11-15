@@ -1,8 +1,8 @@
 use gpui::accesskit::{Role, Toggled};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, Hsla, Pixels, Point, Render, ScrollHandle, SharedString,
-    WeakEntity, Window, div, px,
+    AnyElement, App, ClickEvent, Context, Entity, Hsla, Pixels, Point, Render, ScrollHandle,
+    SharedString, WeakEntity, Window, div, px,
 };
 
 use std::rc::Rc;
@@ -15,8 +15,8 @@ use state::{
     Sonora,
 };
 use ui::{
-    ActiveTheme as _, ArrowRing, Button, InlineLink, InlineLinks, Menu, Picker, Popovers, Popup,
-    SortAxis,
+    ActiveTheme as _, ArrowRing, Button, InlineLink, InlineLinks, Menu, MenuItem, Picker, Popovers,
+    Popup, SortAxis,
 };
 use ui::{
     ColumnSpec, FilterChange, Listing as _, MIN_CONTENT, Pending, Pin, PinKind, Scrollbar,
@@ -29,8 +29,10 @@ use crate::shared::trouble;
 use crate::chrome::tools::{self, Sliders};
 use crate::chrome::{Chrome, Searchable, Toolbar, Tooled};
 use crate::shared::album_grid::CardGrid;
+use crate::shared::blend::Joined;
 use crate::shared::cards;
 use crate::shared::confirm::Confirm;
+use crate::shared::cover_viewer::CoverViewer;
 use crate::shared::hero::{
     ACTION_GAP, HeroMetaStrip, HeroPlayButton, PageHero, copyright_notices, release_date_label,
 };
@@ -73,8 +75,8 @@ impl RailTab {
 struct DetailTracks(Entity<Detail>);
 
 impl Tracks for DetailTracks {
-    fn tracks<'a>(&self, cx: &'a App) -> &'a [Track] {
-        self.0.read(cx).tracks()
+    fn tracks<'a>(&self, cx: &'a App) -> Joined<'a, Track> {
+        self.0.read(cx).tracks().into()
     }
 
     fn is_loading(&self, cx: &App) -> bool {
@@ -109,6 +111,7 @@ pub(crate) struct DetailView {
     sorted: Option<String>,
     shown: Option<String>,
     context_menu: Option<Point<Pixels>>,
+    cover_viewer: Entity<CoverViewer>,
     toolbar: Entity<Toolbar>,
     popovers: Popovers,
     sliders: Sliders,
@@ -230,6 +233,18 @@ impl DetailView {
             .detach();
         }
 
+        if section == "album" {
+            cx.subscribe(&detail, |_, _, event, cx| {
+                let state::DetailEvent::AlbumGone(id) = event;
+                if router::trail(cx).read(cx).current()
+                    == router::Destination::Album(id.clone().into())
+                {
+                    router::replace(router::Destination::Library(router::LibraryTab::Albums), cx);
+                }
+            })
+            .detach();
+        }
+
         // Progress only redraws the download button. A filtered table rebuilds when what it
         // shows may have changed, since a rebuild drops the open menu and the selection.
         let downloads = Sonora::global(cx).downloads.clone();
@@ -269,6 +284,10 @@ impl DetailView {
         })
         .detach();
 
+        let cover_viewer = cx.new(CoverViewer::new);
+        // The hero cover hides while the viewer shows it, until the cover lands back on it.
+        cx.observe(&cover_viewer, |_, _, cx| cx.notify()).detach();
+
         let me = cx.entity();
         let toolbar = Toolbar::searchable(&me, cx);
 
@@ -284,6 +303,7 @@ impl DetailView {
             sorted: None,
             shown: None,
             context_menu: None,
+            cover_viewer,
             toolbar,
             popovers: Popovers::default(),
             sliders: Sliders::default(),
@@ -478,10 +498,22 @@ impl DetailView {
         });
 
         let view = self.me.clone();
+        let view_cover = cover.clone().map(|cover| {
+            let view = self.me.clone();
+            let title = title.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                view.update(cx, |this, cx| {
+                    this.open_cover_viewer(title.clone(), cover.clone(), cx);
+                })
+                .ok();
+            }
+        });
         PageHero::new("detail-hero", title)
             .pending(header.is_none() && self.detail.read(cx).is_loading())
             .pin(pin)
             .cover(cover)
+            .cover_away(self.cover_viewer.read(cx).is_open())
+            .when_some(view_cover, |hero, on_cover| hero.on_cover_click(on_cover))
             .eyebrow(eyebrow)
             .meta(strip)
             .actions(actions)
@@ -494,6 +526,14 @@ impl DetailView {
                 .ok();
             })
             .into_any_element()
+    }
+
+    /// Opens the album's or the playlist's `large` cover in the viewer.
+    fn open_cover_viewer(&mut self, title: SharedString, large: String, cx: &mut Context<Self>) {
+        let owner = self.detail.read(cx).id().map(str::to_owned);
+        self.cover_viewer.update(cx, |viewer, cx| {
+            viewer.open(owner, title, large, false, cx);
+        });
     }
 
     fn library_button(&self, cx: &App) -> Option<Button> {
@@ -774,7 +814,7 @@ impl DetailView {
         let id = detail.id()?.to_owned();
         let header = detail.header()?;
 
-        Some(match header.kind {
+        let menu = match header.kind {
             Collection::Album => {
                 let menus = self.table.read(cx).delegate().source().menu();
                 album_menu(detail.album()?.clone(), self.playback.clone(), menus, cx)
@@ -784,12 +824,33 @@ impl DetailView {
                 let playlist = saved.or_else(|| detail.playlist().cloned())?;
                 playlist_menu(playlist, self.playback.clone(), cx)
             }
+        };
+        Some(match header.cover.clone() {
+            Some(cover) => {
+                let view = self.me.clone();
+                let title = SharedString::from(header.title.clone());
+                menu.lead([MenuItem::new("view-cover", t!("cover-view"))
+                    .icon("icons/image.svg")
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.open_cover_viewer(title.clone(), cover.clone(), cx);
+                        })
+                        .ok();
+                    })])
+            }
+            None => menu,
         })
     }
 }
 
 impl Render for DetailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let detail = self.detail.read(cx);
+        let owner = detail.id().map(str::to_owned);
+        let cover = detail.header().and_then(|header| header.cover.clone());
+        self.cover_viewer.update(cx, |viewer, cx| {
+            viewer.close_if_stale(owner.as_deref(), cover.as_deref(), window, cx)
+        });
         if let Some(failure) = self.failure(cx) {
             return div()
                 .id("detail-failure")
@@ -841,6 +902,7 @@ impl Render for DetailView {
             .child(
                 Scroller::new("detail-page", &self.scrollbar)
                     .bottom_inset(crate::chrome::Chrome::bottom(cx))
+                    .px(crate::chrome::Chrome::margin(window, cx))
                     .pt(inset)
                     .pb(inset)
                     .child(div().px(inset).child(self.header(window, cx)))
@@ -849,6 +911,7 @@ impl Render for DetailView {
                     .child(div().px(inset).pt_10().children(rails)),
             )
             .when_some(context_menu, |this, menu| this.child(menu))
+            .child(self.cover_viewer.clone())
             .into_any_element()
     }
 }
