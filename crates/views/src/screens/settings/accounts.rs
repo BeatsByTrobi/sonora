@@ -8,7 +8,7 @@ use gpui::{
     Window, div, px, relative, svg,
 };
 use i18n::t;
-use music::{AccountChoice, SignIn, SignInPrompt};
+use music::{AccountChoices, SignIn, SignInPrompt};
 use router::{Destination, SettingsPage, navigate};
 use state::{Failure, Scan, SessionState, Sonora};
 use ui::{
@@ -239,8 +239,8 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// One watched folder, placed by its index and the list's length: its path and the
-    /// button that stops watching it.
+    /// One watched folder, placed by its index and the list's length: its path with a button that
+    /// opens it in the file manager, and the button that stops watching it.
     fn local_folder_item(
         (index, count): (usize, usize),
         path: String,
@@ -261,10 +261,35 @@ impl SettingsView {
             .h(theme.metrics.list_row)
             .child(
                 div()
+                    .flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .child(SharedString::from(path.clone())),
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(path.clone())),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("open-local-folder-{path}")))
+                            .ghost()
+                            .icon("icons/folder-open.svg")
+                            .size_8()
+                            .px_0()
+                            .flex_none()
+                            .tooltip("settings-open-folder")
+                            .tint(theme.muted_foreground)
+                            .on_click({
+                                let path = path.clone();
+                                move |_, _, _| {
+                                    if let Err(error) = open::that_detached(&path) {
+                                        log::warn!("settings: cannot open {path}: {error}");
+                                    }
+                                }
+                            }),
+                    ),
             )
             .child(
                 Button::new(SharedString::from(format!("remove-local-folder-{path}")))
@@ -843,7 +868,7 @@ impl SettingsView {
 
     pub(super) fn account_modal(
         &self,
-        accounts: Vec<AccountChoice>,
+        accounts: AccountChoices,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         AccountPicker::new(accounts)
