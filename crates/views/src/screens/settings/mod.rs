@@ -6,7 +6,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, Pixels, Render, ScrollHandle,
-    SharedString, Subscription, Task, Window, canvas, div, px, svg,
+    SharedString, Subscription, Task, Window, canvas, div, px,
 };
 use i18n::{Language, t};
 use music::SignInPrompt;
@@ -17,7 +17,7 @@ use state::{
 };
 use ui::{
     ActiveTheme as _, Card, Deck, Dismiss, Input, Lazy, Popovers, Scrollbar, ScrubberState,
-    Vacancy, faint, snapped, upper,
+    Vacancy, snapped,
 };
 
 use crate::chrome::{Chrome, OutputPicker};
@@ -145,6 +145,7 @@ enum Slot {
     Language,
     Tray,
     TrayIcon,
+    NowPlayingOnFileOpen,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     ServerSideDecorations,
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
@@ -738,6 +739,10 @@ impl SettingsView {
                 t!("settings-close-to-tray-detail"),
             ),
             Slot::TrayIcon => (t!("settings-tray-icon"), t!("settings-tray-icon-detail")),
+            Slot::NowPlayingOnFileOpen => (
+                t!("settings-now-playing-on-file-open"),
+                t!("settings-now-playing-on-file-open-detail"),
+            ),
             Slot::Accounts => {
                 let detail = t!("settings-accounts-detail");
                 let names = self.account_words(cx);
@@ -1009,6 +1014,7 @@ impl SettingsView {
             Slot::Language => self.language_row(cx),
             Slot::Tray => self.tray_row(cx),
             Slot::TrayIcon => self.tray_icon_row(cx),
+            Slot::NowPlayingOnFileOpen => self.now_playing_on_file_open_row(cx),
             Slot::Accounts => div().into_any_element(),
             Slot::LocalFolder => self.local_folder_row(cx),
             Slot::Folders => self.folders(cx),
@@ -1513,19 +1519,5 @@ impl Render for SettingsView {
 
 /// A group's heading: its icon, when it has one, before its name as an uppercase eyebrow.
 pub(super) fn group_heading(label: SharedString, icon: Option<&'static str>, cx: &App) -> Div {
-    let theme = cx.theme();
-
-    faint(cx)
-        .flex()
-        .items_center()
-        .gap_2()
-        .mb(theme.metrics.pad)
-        .children(icon.map(|icon| {
-            svg()
-                .path(icons::path(icon))
-                .size(theme.text(ui::Text::Small))
-                .flex_none()
-                .text_color(theme.muted_foreground)
-        }))
-        .child(upper(label))
+    ui::eyebrow_with(icon, label, cx).mb(cx.theme().metrics.pad)
 }
