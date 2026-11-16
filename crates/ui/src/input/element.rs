@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ContentMask, Context, CursorStyle, Element, ElementInputHandler, Entity,
-    GlobalElementId, InspectorElementId, LayoutId, MouseButton, PaintQuad, Pixels, Point,
+    App, Bounds, BoxShadow, ContentMask, Context, CursorStyle, Element, ElementInputHandler,
+    Entity, GlobalElementId, InspectorElementId, LayoutId, MouseButton, PaintQuad, Pixels, Point,
     ShapedLine, Style, TextRun, UnderlineStyle, Window, div, fill, point, px, relative, size, svg,
 };
 
@@ -14,8 +14,17 @@ use crate::input::{
     clamp_range, masked_text, primary_paste, span,
 };
 use crate::menu::{Menu, MenuItem};
+use crate::motion::mix;
 use crate::popup::Popup;
 use crate::theme::ActiveTheme as _;
+
+/// How much of the foreground a field takes as its fill and as its edge, and how much of the
+/// muted foreground and of the danger colour the ring a focused or turned down field wears.
+const FILL: f32 = 0.045;
+const EDGE: f32 = 0.15;
+const RING: f32 = 0.4;
+/// How far that ring reaches past the field.
+const RING_WIDTH: Pixels = px(2.);
 
 struct Text {
     input: Entity<Input>,
@@ -274,6 +283,43 @@ impl Render for Input {
             false => theme.radius,
         };
 
+        let focused = self.focus_handle.is_focused(window);
+        // a bordered field wears a soft ring outside its edge while it has the focus, and a
+        // danger tinted one while it holds something turned down
+        // The focus ring grows out of the edge as the field takes the focus and sinks back into
+        // it as the field lets go, drawn frame by frame here rather than through an animation
+        // wrapper, which would hide the field's role from screen readers. A turned down field
+        // keeps its danger ring still.
+        let turned = self.ring.turning(focused);
+        let shown = match (self.invalid, self.ring.progress().filter(|_| turned)) {
+            (true, _) => 1.,
+            (false, Some(t)) => {
+                window.request_animation_frame();
+                match focused {
+                    true => t,
+                    false => 1. - t,
+                }
+            }
+            (false, None) => f32::from(u8::from(focused)),
+        };
+        let edge = match self.invalid {
+            true => theme.danger,
+            false => mix(
+                theme.foreground.opacity(EDGE),
+                theme.muted_foreground,
+                shown,
+            ),
+        };
+        let ring = (shown > 0.).then(|| BoxShadow {
+            color: match self.invalid {
+                true => theme.danger.opacity(RING),
+                false => theme.muted_foreground.opacity(RING * shown),
+            },
+            offset: point(Pixels::ZERO, Pixels::ZERO),
+            blur_radius: Pixels::ZERO,
+            spread_radius: RING_WIDTH * shown,
+            inset: false,
+        });
         let empty = self.selected_range.is_empty();
         let context_menu = self.context_menu.map(|position| {
             let paste = cx
@@ -323,10 +369,7 @@ impl Render for Input {
                             })),
                     ),
             )
-            .on_close(cx.listener(|this, _, _, cx| {
-                this.context_menu = None;
-                cx.notify();
-            }))
+            .on_close(cx.listener(|this, _, window, cx| this.context_menu_closed(window, cx)))
         });
 
         div()
@@ -366,7 +409,7 @@ impl Render for Input {
                     (true, ..) => this,
                     (false, true, _, true) => glass(this, cx),
                     (false, false, true, true) => this.bg(theme.secondary_hover),
-                    _ => this.bg(theme.secondary),
+                    _ => this.bg(theme.foreground.opacity(FILL)),
                 },
             )
             .when(self.blurred, |this| this.shadow_sm())
@@ -374,10 +417,9 @@ impl Render for Input {
                 self.tucked || self.bare,
                 |this| this.w_full(),
                 |this| {
-                    this.border_1().border_color(match self.invalid {
-                        true => theme.danger,
-                        false => theme.border,
-                    })
+                    this.border_1()
+                        .border_color(edge)
+                        .when_some(ring, |this, ring| this.shadow(vec![ring]))
                 },
             )
             .overflow_hidden()
@@ -413,6 +455,7 @@ impl Render for Input {
             .when(primary_paste(), |this| {
                 this.on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
             })
+            .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
