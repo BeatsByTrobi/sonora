@@ -11,9 +11,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::mp4::{Input, Prepared, Remote};
 use crate::aac::Aac;
 use crate::engine::{self, Fetch, Loudness};
+use crate::mp4::{Input, Prepared, Remote};
 use crate::stream::{Plain, Stream};
 use crate::subsonic::client::{Details, SubsonicClient};
 use crate::vault::{Recording, Shelf};
@@ -208,7 +208,7 @@ impl Fetch for Subsonic {
             builder = builder.with_byte_len(total);
         }
         let mut decoder = match builder
-            .with_seekable(loaded.prepared.seekable(&loaded.stream))
+            .with_seekable(loaded.prepared.seekable(total, &loaded.stream))
             .build()
         {
             Ok(decoder) => decoder,
